@@ -21,7 +21,6 @@ namespace
         TEXT("hellrun.ai.GOAPTrace"), 0,
         TEXT("Write GOAP solve records to the log when nonzero."), ECVF_Cheat);
 }
-
 UGOAPBrainComponent::UGOAPBrainComponent()
 {
     PrimaryComponentTick.bCanEverTick=true;
@@ -54,7 +53,8 @@ bool UGOAPBrainComponent::StartLogic()
         for(const FText& Error:Errors) UE_LOG(LogTemp,Error,TEXT("GOAP %s: %s"),*GetNameSafe(GetOwner()),*Error.ToString());
         return false;
     }
-    AgentFacts.Reset(); Sensors.Reset();
+    AgentFacts.Reset(); Sensors.Reset(); ActionRetryAfter.Reset();
+    ConsecutiveActionFailures.Reset(); RecoveryReplanAt=-BIG_NUMBER;
     const double Now=GetWorld()?GetWorld()->GetTimeSeconds():0.0;
     const float AgentPhase=static_cast<float>(GetTypeHash(GetOwner()->GetFName())%1024u)/1024.0f;
     for(const UGOAPSensor* Template:Domain->Sensors)
@@ -252,8 +252,20 @@ void UGOAPBrainComponent::Replan(const double Now)
     const FGuid Preferred=ActiveGoalId.IsValid()&&Now<GoalCommitUntil
         ?ActiveGoalId:FGuid();
     FString SelectionFailure;
+    TSet<FGuid> ExcludedActions;
+    double EarliestRetry=BIG_NUMBER;
+    for(auto It=ActionRetryAfter.CreateIterator();It;++It)
+    {
+        if(It.Value()<=Now) It.RemoveCurrent();
+        else
+        {
+            ExcludedActions.Add(It.Key());
+            EarliestRetry=FMath::Min(EarliestRetry,It.Value());
+        }
+    }
     CurrentPlan=FGOAPPlanner::PlanBestEligibleGoal(CompiledDomain,State,
-        Domain->MaximumExpandedNodes,Preferred,&LastGoalScores,&SelectionFailure);
+        Domain->MaximumExpandedNodes,Preferred,&LastGoalScores,&SelectionFailure,
+        ExcludedActions.IsEmpty()?nullptr:&ExcludedActions);
     if(!CurrentPlan.bSucceeded)
     {
         if(bEnableTrace||CVarHellRunGOAPTrace.GetValueOnGameThread()!=0)
@@ -264,8 +276,10 @@ void UGOAPBrainComponent::Replan(const double Now)
         CurrentPlan={};RemainingActions.Reset();ActiveGoalId.Invalidate();
         bReplanRequested=false;LastPlanTime=Now;
         LastReplanReason=SelectionFailure;
+        RecoveryReplanAt=EarliestRetry;
         return;
     }
+    RecoveryReplanAt=-BIG_NUMBER;
     RemainingActions=CurrentPlan.ActionIds; ActiveGoalId=CurrentPlan.GoalId;
     const FGOAPGoalScore* Selected=LastGoalScores.FindByPredicate(
         [&](const FGOAPGoalScore& Score){return Score.GoalId==ActiveGoalId;});
@@ -308,6 +322,8 @@ void UGOAPBrainComponent::FinishActiveAction(const EGOAPTaskStatus Status,const 
     const FGOAPCompiledAction* Action=FindAction(ActiveActionId);
     if(Action&&Status==EGOAPTaskStatus::Succeeded)
     {
+        ActionRetryAfter.Remove(Action->Id);
+        ConsecutiveActionFailures.Remove(Action->Id);
         FGOAPPlanningState State; BuildPlanningState(State);
         for(const FGOAPEffect& Effect:Action->Effects)
         {
@@ -319,7 +335,21 @@ void UGOAPBrainComponent::FinishActiveAction(const EGOAPTaskStatus Status,const 
     if(Action)OnActionChanged.Broadcast(Action->Name,Status);
     ActiveTask=nullptr; ActiveActionId.Invalidate();
     if(Status!=EGOAPTaskStatus::Succeeded)
-    {RemainingActions.Reset();RequestReplan(FString::Printf(TEXT("Action failed: %s"),*Reason));}
+    {
+        if(Action&&(Status==EGOAPTaskStatus::Failed||Reason==TEXT("Timeout")))
+        {
+            const int32 FailureCount=ConsecutiveActionFailures.FindOrAdd(
+                Action->Id)+1;
+            ConsecutiveActionFailures.Add(Action->Id,FailureCount);
+            const double Now=GetWorld()?GetWorld()->GetTimeSeconds():0.0;
+            const float Cooldown=FMath::Min(MaximumActionFailureCooldown,
+                ActionFailureCooldown*FMath::Pow(2.0f,
+                    static_cast<float>(FMath::Min(FailureCount-1,3))));
+            ActionRetryAfter.Add(Action->Id,Now+Cooldown);
+        }
+        RemainingActions.Reset();
+        RequestReplan(FString::Printf(TEXT("Action failed: %s"),*Reason));
+    }
 }
 
 void UGOAPBrainComponent::TickComponent(const float DeltaTime,const ELevelTick TickType,
@@ -330,6 +360,12 @@ void UGOAPBrainComponent::TickComponent(const float DeltaTime,const ELevelTick T
     const double Now=GetWorld()?GetWorld()->GetTimeSeconds():0.0;
     ExpireAgentFacts(Now);
     TickSensors(Now);
+    if(!bReplanRequested&&!ActiveTask&&RecoveryReplanAt>0.0
+        &&Now>=RecoveryReplanAt)
+    {
+        RecoveryReplanAt=-BIG_NUMBER;
+        RequestReplan(TEXT("Failed-action cooldown expired"));
+    }
     const int32 DebugLevel=CVarHellRunGOAPDebug.GetValueOnGameThread();
     if(DebugLevel>0)
     {

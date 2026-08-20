@@ -33,6 +33,16 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="GOAP|Debug")
     bool bEnableTrace=false;
 
+    /** A failed executor is temporarily removed from planning. This prevents
+     * an agent from selecting the same unusable route or attack every replan. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="GOAP|Recovery",
+        meta=(ClampMin="0.05", Units="s"))
+    float ActionFailureCooldown=0.75f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="GOAP|Recovery",
+        meta=(ClampMin="0.05", Units="s"))
+    float MaximumActionFailureCooldown=6.0f;
+
     UPROPERTY(BlueprintAssignable, Category="GOAP")
     FGOAPPlanChanged OnPlanChanged;
 
@@ -141,6 +151,9 @@ private:
     double LastPlanTime=-BIG_NUMBER;
     double GoalCommitUntil=0.0;
     double ActionStartedAt=0.0;
+    double RecoveryReplanAt=-BIG_NUMBER;
+    TMap<FGuid,double> ActionRetryAfter;
+    TMap<FGuid,int32> ConsecutiveActionFailures;
     int32 LocalRevision=0;
     bool bRunning=false;
     bool bReplanRequested=true;
