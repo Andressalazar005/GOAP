@@ -42,6 +42,7 @@ namespace
         float Estimate = 0.0f;
     };
 }
+
 FGOAPPlanResult FGOAPPlanner::Plan(const FGOAPCompiledDomain& Domain,
     const FGOAPPlanningState& InitialState, const FGuid& GoalId,
     const int32 MaximumExpandedNodes,const TSet<FGuid>* ExcludedActions)

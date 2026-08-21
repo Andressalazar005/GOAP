@@ -21,6 +21,7 @@ namespace
         TEXT("hellrun.ai.GOAPTrace"), 0,
         TEXT("Write GOAP solve records to the log when nonzero."), ECVF_Cheat);
 }
+
 UGOAPBrainComponent::UGOAPBrainComponent()
 {
     PrimaryComponentTick.bCanEverTick=true;
